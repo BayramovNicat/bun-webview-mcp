@@ -131,7 +131,7 @@ export class BrowserSessionManager {
   }
 
   async executeAction(args: BrowserActArgs): Promise<string> {
-    const { view, width, height } = this.getActiveView();
+    const { view, backend, width, height } = this.getActiveView();
     const clickCount = (args.clickCount ?? 1) as 1 | 2 | 3;
 
     switch (args.action) {
@@ -277,7 +277,11 @@ export class BrowserSessionManager {
       }
 
       case 'reload': {
-        await view.reload();
+        if (backend === 'webkit' && view.url) {
+          await view.navigate(view.url);
+        } else {
+          await view.reload();
+        }
         return 'Reloaded page';
       }
 

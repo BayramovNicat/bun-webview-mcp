@@ -2,7 +2,7 @@
 import { describe, expect, test } from 'bun:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { parseCookieString, resolveEffectiveBackend } from '../src/auth.ts';
+import { parseCookieString, resolveEffectiveBackend, stripCookieHeader } from '../src/auth.ts';
 import { base64ByteLength } from '../src/capture.ts';
 
 describe('bun-webview-mcp server', () => {
@@ -14,13 +14,19 @@ describe('bun-webview-mcp server', () => {
     }
   });
 
-  test('parseCookieString and resolveEffectiveBackend handle cookies and headers', () => {
+  test('parseCookieString, stripCookieHeader, and resolveEffectiveBackend handle cookies and headers', () => {
     const parsed = parseCookieString('session_id=abc123; theme=dark; flag');
     expect(parsed).toEqual([
       { name: 'session_id', value: 'abc123', path: '/' },
       { name: 'theme', value: 'dark', path: '/' },
       { name: 'flag', value: '', path: '/' },
     ]);
+
+    expect(
+      stripCookieHeader({ Cookie: 'a=1', cookie: 'b=2', Authorization: 'Bearer xyz' }),
+    ).toEqual({
+      Authorization: 'Bearer xyz',
+    });
 
     // Standard cookies keep default backend
     expect(resolveEffectiveBackend({ cookies: 'a=b' }, 'webkit')).toBe('webkit');
@@ -261,6 +267,20 @@ describe('bun-webview-mcp server', () => {
         },
       });
       expect(setCookieRes.isError).toBeFalsy();
+
+      const reloadRes = await client.callTool({
+        name: 'browser_act',
+        arguments: {
+          action: 'reload',
+          includeText: true,
+          takeScreenshot: true,
+        },
+      });
+      expect(reloadRes.isError).toBeFalsy();
+      const reloadText = (reloadRes.content as Array<{ type: string; text?: string }>).find(
+        (c) => c.type === 'text',
+      )?.text;
+      expect(reloadText).toContain('active_token=tok_999');
 
       const getCookieRes = await client.callTool({
         name: 'browser_cookies',

@@ -27,13 +27,19 @@ import { BrowserSessionManager } from './session.ts';
 const sessionManager = new BrowserSessionManager();
 
 /**
- * Type-safe wrapper around McpServer.registerTool that avoids TypeScript's exponential
- * structural check between 20+ field ZodObjects and ZodRawShapeCompat in @modelcontextprotocol/sdk.
+ * Type-safe wrapper around McpServer.registerTool that centralizes error handling,
+ * optional session mutex serialization, and avoids TypeScript's exponential
+ * ZodRawShapeCompat check in @modelcontextprotocol/sdk.
  */
 function defineTool<S extends z.ZodTypeAny>(
   server: McpServer,
   name: string,
-  config: { title: string; description: string; inputSchema: S },
+  config: {
+    title: string;
+    description: string;
+    inputSchema: S;
+    lockSession?: boolean;
+  },
   handler: (args: z.infer<S>) => Promise<CallToolResult>,
 ): void {
   server.registerTool<AnySchema, AnySchema>(
@@ -43,7 +49,16 @@ function defineTool<S extends z.ZodTypeAny>(
       description: config.description,
       inputSchema: config.inputSchema as unknown as AnySchema,
     },
-    (async (args: unknown) => handler(args as z.infer<S>)) as never,
+    (async (args: unknown) => {
+      try {
+        const parsed = args as z.infer<S>;
+        return config.lockSession === false
+          ? await handler(parsed)
+          : await sessionManager.runExclusive(() => handler(parsed));
+      } catch (error) {
+        return formatToolError(name, error);
+      }
+    }) as never,
   );
 }
 
@@ -61,14 +76,11 @@ export function createServer(): McpServer {
       description:
         'Opens a URL in Bun.WebView headless browser (supporting custom cookies, HTTP headers like Authorization, localStorage, and sessionStorage), scrolls to trigger lazy-loaded content, captures a full-page (or viewport) screenshot, and returns the image directly to the LLM.',
       inputSchema: ScreenshotPageSchema,
+      lockSession: false,
     },
     async (args) => {
-      try {
-        const result = await screenshotPageOneShot(args);
-        return formatScreenshotResponse(result);
-      } catch (error) {
-        return formatToolError('screenshot_page', error);
-      }
+      const result = await screenshotPageOneShot(args);
+      return formatScreenshotResponse(result);
     },
   );
 
@@ -82,15 +94,9 @@ export function createServer(): McpServer {
       inputSchema: BrowserOpenSchema,
     },
     async (args) => {
-      try {
-        return await sessionManager.runExclusive(async () => {
-          const { view, backend } = sessionManager.getOrCreateView(args);
-          const result = await captureFromView(view, backend, args, true);
-          return formatScreenshotResponse(result);
-        });
-      } catch (error) {
-        return formatToolError('browser_open', error);
-      }
+      const { view, backend } = sessionManager.getOrCreateView(args);
+      const result = await captureFromView(view, backend, args, true);
+      return formatScreenshotResponse(result);
     },
   );
 
@@ -104,36 +110,30 @@ export function createServer(): McpServer {
       inputSchema: BrowserActSchema,
     },
     async (args) => {
-      try {
-        return await sessionManager.runExclusive(async () => {
-          const actionNote = await sessionManager.executeAction(args);
-          const { view, backend, width, height } = sessionManager.getActiveView();
+      const actionNote = await sessionManager.executeAction(args);
+      const { view, backend, width, height } = sessionManager.getActiveView();
 
-          if (args.takeScreenshot) {
-            const result = await captureFromView(
-              view,
-              backend,
-              {
-                width,
-                height,
-                fullPage: args.fullPage ?? true,
-                format: args.format ?? 'jpeg',
-                quality: args.quality ?? 80,
-                includeText: args.includeText ?? false,
-                includeElements: args.includeElements ?? false,
-                scrollForLazyLoad: false,
-                waitMs: 150,
-              },
-              true,
-            );
-            return formatScreenshotResponse(result, actionNote);
-          }
-
-          return formatTextResponse(`${actionNote}\nURL: ${view.url}\nTitle: ${view.title}`);
-        });
-      } catch (error) {
-        return formatToolError('browser_act', error);
+      if (args.takeScreenshot) {
+        const result = await captureFromView(
+          view,
+          backend,
+          {
+            width,
+            height,
+            fullPage: args.fullPage ?? true,
+            format: args.format ?? 'jpeg',
+            quality: args.quality ?? 80,
+            includeText: args.includeText ?? false,
+            includeElements: args.includeElements ?? false,
+            scrollForLazyLoad: false,
+            waitMs: 150,
+          },
+          true,
+        );
+        return formatScreenshotResponse(result, actionNote);
       }
+
+      return formatTextResponse(`${actionNote}\nURL: ${view.url}\nTitle: ${view.title}`);
     },
   );
 
@@ -147,33 +147,27 @@ export function createServer(): McpServer {
       inputSchema: BrowserCookiesSchema,
     },
     async (args) => {
-      try {
-        return await sessionManager.runExclusive(async () => {
-          const { view, backend } = sessionManager.getActiveView();
-          switch (args.action) {
-            case 'get': {
-              const cookies = await getCookiesFromView(view, backend, args.url);
-              return formatTextResponse(
-                cookies.length === 0
-                  ? 'No cookies found.'
-                  : `Cookies (${cookies.length}):\n${JSON.stringify(cookies, null, 2)}`,
-              );
-            }
-            case 'set': {
-              if (!args.cookies) {
-                throw new Error("Provide 'cookies' when action is 'set'.");
-              }
-              const count = await setCookiesInView(view, backend, args.cookies, args.url);
-              return formatTextResponse(`Set ${count} cookie(s).`);
-            }
-            case 'clear': {
-              await clearCookiesInView(view, backend);
-              return formatTextResponse('Cleared browser cookies.');
-            }
+      const { view, backend } = sessionManager.getActiveView();
+      switch (args.action) {
+        case 'get': {
+          const cookies = await getCookiesFromView(view, backend, args.url);
+          return formatTextResponse(
+            cookies.length === 0
+              ? 'No cookies found.'
+              : `Cookies (${cookies.length}):\n${JSON.stringify(cookies, null, 2)}`,
+          );
+        }
+        case 'set': {
+          if (!args.cookies) {
+            throw new Error("Provide 'cookies' when action is 'set'.");
           }
-        });
-      } catch (error) {
-        return formatToolError('browser_cookies', error);
+          const count = await setCookiesInView(view, backend, args.cookies, args.url);
+          return formatTextResponse(`Set ${count} cookie(s).`);
+        }
+        case 'clear': {
+          await clearCookiesInView(view, backend);
+          return formatTextResponse('Cleared browser cookies.');
+        }
       }
     },
   );
@@ -188,17 +182,11 @@ export function createServer(): McpServer {
       inputSchema: BrowserElementsSchema,
     },
     async (args) => {
-      try {
-        return await sessionManager.runExclusive(async () => {
-          const { view } = sessionManager.getActiveView();
-          const elements = await getInteractiveElements(view, args.limit);
-          return formatTextResponse(
-            `URL: ${view.url}\nTitle: ${view.title}\nInteractive Elements (${elements.length}):\n${formatElementsList(elements)}`,
-          );
-        });
-      } catch (error) {
-        return formatToolError('browser_elements', error);
-      }
+      const { view } = sessionManager.getActiveView();
+      const elements = await getInteractiveElements(view, args.limit);
+      return formatTextResponse(
+        `URL: ${view.url}\nTitle: ${view.title}\nInteractive Elements (${elements.length}):\n${formatElementsList(elements)}`,
+      );
     },
   );
 
@@ -212,15 +200,9 @@ export function createServer(): McpServer {
       inputSchema: BrowserScreenshotSchema,
     },
     async (args) => {
-      try {
-        return await sessionManager.runExclusive(async () => {
-          const { view, backend, width, height } = sessionManager.getActiveView();
-          const result = await captureFromView(view, backend, { ...args, width, height }, true);
-          return formatScreenshotResponse(result);
-        });
-      } catch (error) {
-        return formatToolError('browser_screenshot', error);
-      }
+      const { view, backend, width, height } = sessionManager.getActiveView();
+      const result = await captureFromView(view, backend, { ...args, width, height }, true);
+      return formatScreenshotResponse(result);
     },
   );
 
@@ -232,18 +214,15 @@ export function createServer(): McpServer {
       description:
         'Returns console.log, console.warn, and console.error messages captured from the active browser session.',
       inputSchema: BrowserConsoleSchema,
+      lockSession: false,
     },
     async (args) => {
-      try {
-        const logs = sessionManager.getConsoleLogs(args.clear);
-        return formatTextResponse(
-          logs.length === 0
-            ? 'No console logs captured.'
-            : logs.map((l) => `[${l.timestamp}] [${l.type}] ${l.text}`).join('\n'),
-        );
-      } catch (error) {
-        return formatToolError('browser_console', error);
-      }
+      const logs = sessionManager.getConsoleLogs(args.clear);
+      return formatTextResponse(
+        logs.length === 0
+          ? 'No console logs captured.'
+          : logs.map((l) => `[${l.timestamp}] [${l.type}] ${l.text}`).join('\n'),
+      );
     },
   );
 

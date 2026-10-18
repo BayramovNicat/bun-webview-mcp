@@ -50,12 +50,17 @@ export function normalizeCookies(
 }
 
 /**
- * Returns HTTP headers excluding any `Cookie` header that is already handled via cookie injection,
- * or keeps all headers for CDP `Network.setExtraHTTPHeaders`.
+ * Returns HTTP headers excluding any `Cookie` header (which is normalized and set via cookies).
  */
-function hasNonCookieHeaders(headers?: Record<string, string>): boolean {
-  if (!headers) return false;
-  return Object.keys(headers).some((k) => k.toLowerCase() !== 'cookie');
+export function stripCookieHeader(headers?: Record<string, string>): Record<string, string> {
+  if (!headers) return {};
+  const filtered: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() !== 'cookie') {
+      filtered[k] = v;
+    }
+  }
+  return filtered;
 }
 
 /**
@@ -70,24 +75,23 @@ export function resolveEffectiveBackend(
     return options.backend;
   }
 
+  const nonCookieHeaders = stripCookieHeader(options?.headers);
   const cookies = normalizeCookies(options?.cookies, options?.headers);
   const needsCdp =
-    hasNonCookieHeaders(options?.headers) ||
+    Object.keys(nonCookieHeaders).length > 0 ||
     Boolean(options?.userAgent) ||
     cookies.some((c) => c.httpOnly === true);
 
-  if (needsCdp) {
-    return 'chrome';
-  }
-
-  return fallbackBackend;
+  return needsCdp ? 'chrome' : fallbackBackend;
 }
 
-function attachTargetUrlToCookies(cookies: CookieItem[], targetUrl: string): CookieItem[] {
+function attachTargetUrlToCookies(cookies: CookieItem[], targetUrl?: string): CookieItem[] {
   let parsedUrl: URL | null = null;
-  try {
-    parsedUrl = new URL(targetUrl);
-  } catch {}
+  if (targetUrl) {
+    try {
+      parsedUrl = new URL(targetUrl);
+    } catch {}
+  }
 
   const isHttp = parsedUrl?.protocol === 'http:' || parsedUrl?.protocol === 'https:';
 
@@ -115,6 +119,52 @@ function formatDocumentCookieAssignment(cookie: CookieItem): string {
 }
 
 /**
+ * Shared in-page function to apply document.cookie strings, localStorage, and sessionStorage.
+ */
+function applyBrowserStateInPage(payload: {
+  cookieStrings: string[];
+  localStorage: Record<string, string>;
+  sessionStorage: Record<string, string>;
+}): void {
+  try {
+    for (const c of payload.cookieStrings) {
+      // biome-ignore lint/suspicious/noDocumentCookie: Required to set cookies in WKWebView page context
+      document.cookie = c;
+    }
+    for (const [k, v] of Object.entries(payload.localStorage)) {
+      window.localStorage.setItem(k, v);
+    }
+    for (const [k, v] of Object.entries(payload.sessionStorage)) {
+      window.sessionStorage.setItem(k, v);
+    }
+  } catch {}
+}
+
+async function applyCookiesToView(
+  view: Bun.WebView,
+  backend: BackendType,
+  cookies: CookieItem[],
+  targetUrl?: string,
+): Promise<number> {
+  if (cookies.length === 0) return 0;
+
+  if (backend === 'chrome') {
+    await view.cdp('Network.enable');
+    const cdpCookies = attachTargetUrlToCookies(cookies, targetUrl || view.url);
+    await view.cdp('Network.setCookies', { cookies: cdpCookies });
+    return cdpCookies.length;
+  }
+
+  const cookieStrings = cookies.map(formatDocumentCookieAssignment);
+  await evalInPage(view, applyBrowserStateInPage, {
+    cookieStrings,
+    localStorage: {},
+    sessionStorage: {},
+  });
+  return cookieStrings.length;
+}
+
+/**
  * Navigates to `url` while applying cookies, custom HTTP headers, User-Agent, and localStorage/sessionStorage.
  */
 export async function navigateWithAuth(
@@ -124,14 +174,13 @@ export async function navigateWithAuth(
   auth?: AuthOptions,
 ): Promise<void> {
   const cookies = normalizeCookies(auth?.cookies, auth?.headers);
-  const hasHeaders = Boolean(auth?.headers && Object.keys(auth.headers).length > 0);
-  const hasLocalStorage = Boolean(auth?.localStorage && Object.keys(auth.localStorage).length > 0);
-  const hasSessionStorage = Boolean(
-    auth?.sessionStorage && Object.keys(auth.sessionStorage).length > 0,
-  );
+  const extraHeaders = stripCookieHeader(auth?.headers);
+  const hasExtraHeaders = Object.keys(extraHeaders).length > 0;
+  const localStorage = auth?.localStorage ?? {};
+  const sessionStorage = auth?.sessionStorage ?? {};
+  const hasStorage = Object.keys(localStorage).length > 0 || Object.keys(sessionStorage).length > 0;
   const hasUserAgent = Boolean(auth?.userAgent);
-  const hasAnyAuth =
-    cookies.length > 0 || hasHeaders || hasLocalStorage || hasSessionStorage || hasUserAgent;
+  const hasAnyAuth = cookies.length > 0 || hasExtraHeaders || hasStorage || hasUserAgent;
 
   if (!hasAnyAuth) {
     await view.navigate(url);
@@ -139,16 +188,15 @@ export async function navigateWithAuth(
   }
 
   if (backend === 'chrome') {
-    // Establish CDP session if this view has not navigated yet
     if (!view.url) {
       await view.navigate('about:blank');
     }
 
     await view.cdp('Network.enable');
 
-    if (hasHeaders && auth?.headers) {
+    if (hasExtraHeaders) {
       await view.cdp('Network.setExtraHTTPHeaders', {
-        headers: auth.headers,
+        headers: extraHeaders,
       });
     }
 
@@ -159,23 +207,18 @@ export async function navigateWithAuth(
     }
 
     if (cookies.length > 0) {
-      const cdpCookies = attachTargetUrlToCookies(cookies, url);
-      await view.cdp('Network.setCookies', { cookies: cdpCookies });
+      await applyCookiesToView(view, 'chrome', cookies, url);
     }
 
-    if (hasLocalStorage || hasSessionStorage) {
+    if (hasStorage) {
       await view.cdp('Page.enable');
-      const lsJson = JSON.stringify(auth?.localStorage ?? {});
-      const ssJson = JSON.stringify(auth?.sessionStorage ?? {});
+      const payloadJson = JSON.stringify({
+        cookieStrings: [],
+        localStorage,
+        sessionStorage,
+      });
       await view.cdp('Page.addScriptToEvaluateOnNewDocument', {
-        source: `(() => {
-          try {
-            const ls = ${lsJson};
-            for (const [k, v] of Object.entries(ls)) window.localStorage.setItem(k, v);
-            const ss = ${ssJson};
-            for (const [k, v] of Object.entries(ss)) window.sessionStorage.setItem(k, v);
-          } catch {}
-        })()`,
+        source: `(${applyBrowserStateInPage.toString()})(${payloadJson})`,
       });
     }
 
@@ -183,33 +226,13 @@ export async function navigateWithAuth(
     return;
   }
 
-  // WebKit backend: navigate to establish origin, inject document.cookie + storage, and reload
+  // WebKit backend: navigate to establish origin, inject cookies + storage, then navigate again
   await view.navigate(url);
-
-  const cookieStrings = cookies.map(formatDocumentCookieAssignment);
-  await evalInPage(
-    view,
-    (payload) => {
-      try {
-        for (const c of payload.cookieStrings) {
-          // biome-ignore lint/suspicious/noDocumentCookie: Required to set cookies in WKWebView page context
-          document.cookie = c;
-        }
-        for (const [k, v] of Object.entries(payload.localStorage)) {
-          window.localStorage.setItem(k, v);
-        }
-        for (const [k, v] of Object.entries(payload.sessionStorage)) {
-          window.sessionStorage.setItem(k, v);
-        }
-      } catch {}
-    },
-    {
-      cookieStrings,
-      localStorage: auth?.localStorage ?? {},
-      sessionStorage: auth?.sessionStorage ?? {},
-    },
-  );
-
+  await evalInPage(view, applyBrowserStateInPage, {
+    cookieStrings: cookies.map(formatDocumentCookieAssignment),
+    localStorage,
+    sessionStorage,
+  });
   await view.navigate(url);
 }
 
@@ -249,29 +272,7 @@ export async function setCookiesInView(
   url?: string,
 ): Promise<number> {
   const cookies = normalizeCookies(cookiesInput);
-  if (cookies.length === 0) return 0;
-
-  const effectiveUrl = url || view.url;
-
-  if (backend === 'chrome') {
-    await view.cdp('Network.enable');
-    const cdpCookies = effectiveUrl ? attachTargetUrlToCookies(cookies, effectiveUrl) : cookies;
-    await view.cdp('Network.setCookies', { cookies: cdpCookies });
-    return cdpCookies.length;
-  }
-
-  const cookieStrings = cookies.map(formatDocumentCookieAssignment);
-  await evalInPage(
-    view,
-    (list) => {
-      for (const c of list) {
-        // biome-ignore lint/suspicious/noDocumentCookie: Required to set cookies in WKWebView page context
-        document.cookie = c;
-      }
-    },
-    cookieStrings,
-  );
-  return cookieStrings.length;
+  return await applyCookiesToView(view, backend, cookies, url);
 }
 
 export async function clearCookiesInView(view: Bun.WebView, backend: BackendType): Promise<void> {
@@ -281,15 +282,15 @@ export async function clearCookiesInView(view: Bun.WebView, backend: BackendType
     return;
   }
 
-  await evalInPage(view, () => {
-    const pairs = (document.cookie || '').split(';');
-    for (const pair of pairs) {
-      const eqIdx = pair.indexOf('=');
-      const name = (eqIdx > -1 ? pair.slice(0, eqIdx) : pair).trim();
-      if (name) {
-        // biome-ignore lint/suspicious/noDocumentCookie: Required to expire cookies in WKWebView page context
-        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
-      }
-    }
-  });
+  const current = await getCookiesFromView(view, 'webkit');
+  const expiredStrings = current.map(
+    (c) => `${c.name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`,
+  );
+  if (expiredStrings.length > 0) {
+    await evalInPage(view, applyBrowserStateInPage, {
+      cookieStrings: expiredStrings,
+      localStorage: {},
+      sessionStorage: {},
+    });
+  }
 }
