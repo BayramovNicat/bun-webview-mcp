@@ -1,0 +1,24 @@
+{
+  "name": "bun-webview-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for AI agents using Bun.WebView to open pages and return full-page screenshots to LLMs",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "bun-webview-mcp": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "format": "bunx biome check --write ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/bun": "latest",
+    "typescript": "^5.8.2"
+  }
+}

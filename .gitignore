@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build & TypeScript outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Logs & crash dumps
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Bun & WebView runtime artifacts
+.bun/
+browser-profile/
+.webview-profile/
+screenshots/
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
