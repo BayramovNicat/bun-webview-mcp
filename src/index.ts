@@ -62,11 +62,23 @@ function defineTool<S extends z.ZodTypeAny>(
   );
 }
 
+const SERVER_INSTRUCTIONS = [
+  'Use `screenshot_page` for one-shot stateless full-page or viewport screenshots of any URL.',
+  'Use `browser_open` + `browser_act` for multi-step interactive workflows (clicking, filling forms with `paste`, selecting options, scrolling, evaluating JS, or inspecting console logs).',
+  'Pass `cookieString`, `cookies`, `headers` (e.g. Authorization), `localStorage`, or `sessionStorage` to `screenshot_page` or `browser_open` when accessing authenticated pages.',
+  'Always call `browser_close` when finished with an interactive `browser_open` session.',
+].join(' ');
+
 export function createServer(): McpServer {
-  const server = new McpServer({
-    name: 'bun-webview-mcp',
-    version: '1.2.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'bun-webview-mcp',
+      version: '1.2.0',
+    },
+    {
+      instructions: SERVER_INSTRUCTIONS,
+    },
+  );
 
   defineTool(
     server,

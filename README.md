@@ -56,6 +56,15 @@ Add `bun-webview` to your MCP configuration file (for example, `~/.gemini/antigr
 
 > **Tip**: Run `which bun` in your terminal to get the exact absolute path to your `bun` binary.
 
+### Optional: Install the Agent Skill (`SKILL.md`)
+
+A ready-to-use skill definition is included in [`skills/bun-webview/SKILL.md`](./skills/bun-webview/SKILL.md) so AI agents immediately know when to activate `bun-webview` and how to invoke its lazy-loaded tools without reading individual JSON schema files first:
+
+```bash
+mkdir -p ~/.gemini/config/skills/bun-webview
+cp skills/bun-webview/SKILL.md ~/.gemini/config/skills/bun-webview/SKILL.md
+```
+
 ### Example Prompts to Try
 
 - *"Use `bun-webview` `screenshot_page` to open `https://bun.com` and describe the full page layout."*
