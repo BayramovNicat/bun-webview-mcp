@@ -217,7 +217,7 @@ export async function getInteractiveElements(
 
       function buildUniqueSelector(el: Element): string {
         if (el.id && /^[a-zA-Z][\w-]*$/.test(el.id)) {
-          const byId = '#' + CSS.escape(el.id);
+          const byId = `#${CSS.escape(el.id)}`;
           if (document.querySelectorAll(byId).length === 1) return byId;
         }
         for (const attr of [
@@ -243,7 +243,7 @@ export async function getInteractiveElements(
         while (cur && cur.nodeType === 1 && cur !== document.body && parts.length < 5) {
           let part = cur.tagName.toLowerCase();
           if (cur.id && /^[a-zA-Z][\w-]*$/.test(cur.id)) {
-            parts.unshift('#' + CSS.escape(cur.id));
+            parts.unshift(`#${CSS.escape(cur.id)}`);
             break;
           }
           const parentEl: Element | null = cur.parentElement;
@@ -313,8 +313,9 @@ export async function getInteractiveElements(
         ) {
           item.value = (el as HTMLInputElement).value.slice(0, 120);
         }
-        if (tag === 'a' && el.getAttribute('href')) {
-          item.href = el.getAttribute('href')!;
+        const hrefAttr = el.getAttribute('href');
+        if (tag === 'a' && hrefAttr) {
+          item.href = hrefAttr;
         }
         if (
           'checked' in el &&

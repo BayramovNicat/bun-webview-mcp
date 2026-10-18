@@ -17,7 +17,7 @@ describe('bun-webview-mcp server', () => {
     const transport = new StdioClientTransport({
       command: 'bun',
       args: ['run', 'src/index.ts'],
-      cwd: import.meta.dir + '/..',
+      cwd: `${import.meta.dir}/..`,
     });
 
     const client = new Client({
@@ -85,7 +85,7 @@ describe('bun-webview-mcp server', () => {
       expect(imageBlock).toBeDefined();
       expect(imageBlock?.mimeType).toBe('image/png');
 
-      const pngBuffer = Buffer.from(imageBlock!.data!, 'base64');
+      const pngBuffer = Buffer.from(imageBlock?.data ?? '', 'base64');
       expect(pngBuffer.subarray(0, 4).toString('hex')).toBe('89504e47');
       const pixelWidth = pngBuffer.readUInt32BE(16);
       const pixelHeight = pngBuffer.readUInt32BE(20);
