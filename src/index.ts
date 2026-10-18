@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { AnySchema } from '@modelcontextprotocol/sdk/server/zod-compat.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { z } from 'zod';
+import { clearCookiesInView, getCookiesFromView, setCookiesInView } from './auth.ts';
 import { captureFromView, screenshotPageOneShot } from './capture.ts';
 import {
   formatElementsList,
@@ -15,6 +16,7 @@ import { getInteractiveElements } from './page-scripts.ts';
 import {
   BrowserActSchema,
   BrowserConsoleSchema,
+  BrowserCookiesSchema,
   BrowserElementsSchema,
   BrowserOpenSchema,
   BrowserScreenshotSchema,
@@ -48,7 +50,7 @@ function defineTool<S extends z.ZodTypeAny>(
 export function createServer(): McpServer {
   const server = new McpServer({
     name: 'bun-webview-mcp',
-    version: '1.1.0',
+    version: '1.2.0',
   });
 
   defineTool(
@@ -57,7 +59,7 @@ export function createServer(): McpServer {
     {
       title: 'Open Page & Take Full-Page Screenshot',
       description:
-        'Opens a URL in Bun.WebView headless browser, scrolls to trigger lazy-loaded content, captures a full-page (or viewport) screenshot, and returns the image directly to the LLM.',
+        'Opens a URL in Bun.WebView headless browser (supporting custom cookies, HTTP headers like Authorization, localStorage, and sessionStorage), scrolls to trigger lazy-loaded content, captures a full-page (or viewport) screenshot, and returns the image directly to the LLM.',
       inputSchema: ScreenshotPageSchema,
     },
     async (args) => {
@@ -76,18 +78,13 @@ export function createServer(): McpServer {
     {
       title: 'Open URL in Persistent Browser Session',
       description:
-        'Opens a URL in a persistent Bun.WebView session (keeping the page open for subsequent interactions like click/type/paste/select/scroll) and returns a screenshot to the LLM.',
+        'Opens a URL in a persistent Bun.WebView session (supporting custom cookies, HTTP headers, localStorage, sessionStorage, and profileDirectory) and returns a screenshot to the LLM.',
       inputSchema: BrowserOpenSchema,
     },
     async (args) => {
       try {
         return await sessionManager.runExclusive(async () => {
-          const { view, backend } = sessionManager.getOrCreateView({
-            backend: args.backend,
-            width: args.width,
-            height: args.height,
-            profileDirectory: args.profileDirectory,
-          });
+          const { view, backend } = sessionManager.getOrCreateView(args);
           const result = await captureFromView(view, backend, args, true);
           return formatScreenshotResponse(result);
         });
@@ -136,6 +133,47 @@ export function createServer(): McpServer {
         });
       } catch (error) {
         return formatToolError('browser_act', error);
+      }
+    },
+  );
+
+  defineTool(
+    server,
+    'browser_cookies',
+    {
+      title: 'Get, Set, or Clear Browser Cookies',
+      description:
+        'Reads current cookies, injects new cookies (string or structured objects), or clears all cookies in the active browser session.',
+      inputSchema: BrowserCookiesSchema,
+    },
+    async (args) => {
+      try {
+        return await sessionManager.runExclusive(async () => {
+          const { view, backend } = sessionManager.getActiveView();
+          switch (args.action) {
+            case 'get': {
+              const cookies = await getCookiesFromView(view, backend, args.url);
+              return formatTextResponse(
+                cookies.length === 0
+                  ? 'No cookies found.'
+                  : `Cookies (${cookies.length}):\n${JSON.stringify(cookies, null, 2)}`,
+              );
+            }
+            case 'set': {
+              if (!args.cookies) {
+                throw new Error("Provide 'cookies' when action is 'set'.");
+              }
+              const count = await setCookiesInView(view, backend, args.cookies, args.url);
+              return formatTextResponse(`Set ${count} cookie(s).`);
+            }
+            case 'clear': {
+              await clearCookiesInView(view, backend);
+              return formatTextResponse('Cleared browser cookies.');
+            }
+          }
+        });
+      } catch (error) {
+        return formatToolError('browser_cookies', error);
       }
     },
   );

@@ -2,6 +2,7 @@
 import { describe, expect, test } from 'bun:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { parseCookieString, resolveEffectiveBackend } from '../src/auth.ts';
 import { base64ByteLength } from '../src/capture.ts';
 
 describe('bun-webview-mcp server', () => {
@@ -13,7 +14,55 @@ describe('bun-webview-mcp server', () => {
     }
   });
 
-  test('supports full-page screenshot, full browser interactions, and concurrent session requests', async () => {
+  test('parseCookieString and resolveEffectiveBackend handle cookies and headers', () => {
+    const parsed = parseCookieString('session_id=abc123; theme=dark; flag');
+    expect(parsed).toEqual([
+      { name: 'session_id', value: 'abc123', path: '/' },
+      { name: 'theme', value: 'dark', path: '/' },
+      { name: 'flag', value: '', path: '/' },
+    ]);
+
+    // Standard cookies keep default backend
+    expect(resolveEffectiveBackend({ cookies: 'a=b' }, 'webkit')).toBe('webkit');
+    // Custom HTTP headers auto-select 'chrome'
+    expect(resolveEffectiveBackend({ headers: { Authorization: 'Bearer tok' } }, 'webkit')).toBe(
+      'chrome',
+    );
+    // HttpOnly cookies auto-select 'chrome'
+    expect(
+      resolveEffectiveBackend(
+        { cookies: [{ name: 'sid', value: '1', path: '/', httpOnly: true }] },
+        'webkit',
+      ),
+    ).toBe('chrome');
+  });
+
+  test('supports full-page screenshot, full browser interactions, auth cookies/headers, and concurrent session requests', async () => {
+    const authServer = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const cookieHeader = req.headers.get('cookie') || '';
+        const authHeader = req.headers.get('authorization') || '';
+        const html = `<!DOCTYPE html>
+          <html>
+            <head><title>Authenticated Dashboard</title></head>
+            <body>
+              <div id="server-cookie">${cookieHeader}</div>
+              <div id="server-auth">${authHeader}</div>
+              <div id="client-storage"></div>
+              <script>
+                document.getElementById('client-storage').textContent =
+                  'ls=' + (localStorage.getItem('auth_tier') || 'none') +
+                  ',ss=' + (sessionStorage.getItem('tab_token') || 'none');
+              </script>
+            </body>
+          </html>`;
+        return new Response(html, {
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      },
+    });
+
     const transport = new StdioClientTransport({
       command: 'bun',
       args: ['run', 'src/index.ts'],
@@ -22,7 +71,7 @@ describe('bun-webview-mcp server', () => {
 
     const client = new Client({
       name: 'test-agent-client',
-      version: '1.1.0',
+      version: '1.2.0',
     });
 
     await client.connect(transport);
@@ -33,6 +82,7 @@ describe('bun-webview-mcp server', () => {
       expect(toolNames).toContain('screenshot_page');
       expect(toolNames).toContain('browser_open');
       expect(toolNames).toContain('browser_act');
+      expect(toolNames).toContain('browser_cookies');
       expect(toolNames).toContain('browser_elements');
       expect(toolNames).toContain('browser_screenshot');
       expect(toolNames).toContain('browser_console');
@@ -92,7 +142,28 @@ describe('bun-webview-mcp server', () => {
       expect(pixelHeight).toBeGreaterThanOrEqual(2200);
       expect(pixelWidth).toBeGreaterThanOrEqual(1000);
 
-      // 2. Test full interactive browser workflow: inputs, paste/fill, select, click, console
+      // 2. Test authenticated page capture with cookies + localStorage + sessionStorage on WebKit
+      const authUrl = `http://127.0.0.1:${authServer.port}/dashboard`;
+      const authShotRes = await client.callTool({
+        name: 'screenshot_page',
+        arguments: {
+          url: authUrl,
+          backend: 'webkit',
+          cookies: 'session_user=nicat; role=admin',
+          localStorage: { auth_tier: 'enterprise' },
+          sessionStorage: { tab_token: 'xyz987' },
+          includeText: true,
+        },
+      });
+      expect(authShotRes.isError).toBeFalsy();
+      const authShotText = (authShotRes.content as Array<{ type: string; text?: string }>).find(
+        (c) => c.type === 'text',
+      )?.text;
+      expect(authShotText).toContain('session_user=nicat');
+      expect(authShotText).toContain('role=admin');
+      expect(authShotText).toContain('ls=enterprise,ss=xyz987');
+
+      // 3. Test full interactive browser workflow: inputs, paste/fill, select, click, console, cookies
       const interactiveHtml = `<!DOCTYPE html>
         <html>
           <head><title>Interactive Form</title></head>
@@ -129,7 +200,7 @@ describe('bun-webview-mcp server', () => {
       expect(openText).toContain('#email');
       expect(openText).toContain('#submit-btn');
 
-      // 3. Dispatch concurrent session calls via Promise.all to verify mutex serialization
+      // 4. Dispatch concurrent session calls via Promise.all to verify mutex serialization
       const [pasteRes, selectRes, clickRes] = await Promise.all([
         client.callTool({
           name: 'browser_act',
@@ -177,6 +248,34 @@ describe('bun-webview-mcp server', () => {
       const consoleText = (consoleRes.content as Array<{ type: string; text?: string }>)[0]?.text;
       expect(consoleText).toContain('Submitted: agent@bun.sh admin');
 
+      // 5. Test browser_cookies tool on active HTTP page
+      await client.callTool({
+        name: 'browser_open',
+        arguments: { url: authUrl, backend: 'webkit', takeScreenshot: false },
+      });
+      const setCookieRes = await client.callTool({
+        name: 'browser_cookies',
+        arguments: {
+          action: 'set',
+          cookies: [{ name: 'active_token', value: 'tok_999', path: '/' }],
+        },
+      });
+      expect(setCookieRes.isError).toBeFalsy();
+
+      const getCookieRes = await client.callTool({
+        name: 'browser_cookies',
+        arguments: { action: 'get' },
+      });
+      const getCookieText = (getCookieRes.content as Array<{ type: string; text?: string }>)[0]
+        ?.text;
+      expect(getCookieText).toContain('tok_999');
+
+      const clearCookieRes = await client.callTool({
+        name: 'browser_cookies',
+        arguments: { action: 'clear' },
+      });
+      expect(clearCookieRes.isError).toBeFalsy();
+
       const closeRes = await client.callTool({
         name: 'browser_close',
         arguments: {},
@@ -184,6 +283,7 @@ describe('bun-webview-mcp server', () => {
       expect(closeRes.isError).toBeFalsy();
     } finally {
       await client.close();
+      authServer.stop(true);
     }
   }, 30000);
 });

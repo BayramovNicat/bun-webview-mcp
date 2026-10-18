@@ -1,3 +1,4 @@
+import { resolveEffectiveBackend } from './auth.ts';
 import { clampDimension, getDefaultBackend } from './capture.ts';
 import {
   clearElementOrFocusedInput,
@@ -6,7 +7,7 @@ import {
   selectOptionInView,
   waitForDomCondition,
 } from './page-scripts.ts';
-import type { BackendType, BrowserActArgs } from './schemas.ts';
+import type { AuthOptions, BackendType, BrowserActArgs } from './schemas.ts';
 
 export interface ConsoleLogEntry {
   type: string;
@@ -37,18 +38,20 @@ export class BrowserSessionManager {
     return next;
   }
 
-  getOrCreateView(options?: {
-    backend?: BackendType;
-    width?: number;
-    height?: number;
-    profileDirectory?: string;
-  }): {
+  getOrCreateView(
+    options?: AuthOptions & {
+      backend?: BackendType;
+      width?: number;
+      height?: number;
+      profileDirectory?: string;
+    },
+  ): {
     view: Bun.WebView;
     backend: BackendType;
     width: number;
     height: number;
   } {
-    const requestedBackend = options?.backend ?? this.backend;
+    const requestedBackend = resolveEffectiveBackend(options, this.backend);
     const width = clampDimension(options?.width ?? this.width);
     const height = clampDimension(options?.height ?? this.height);
     const profileDirectory = options?.profileDirectory ?? this.profileDirectory;

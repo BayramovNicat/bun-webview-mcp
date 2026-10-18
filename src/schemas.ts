@@ -5,10 +5,61 @@ export const ImageFormatSchema = z.enum(['jpeg', 'png', 'webp']);
 export const ModifierSchema = z.enum(['Shift', 'Control', 'Alt', 'Meta']);
 export const MouseButtonSchema = z.enum(['left', 'right', 'middle']);
 export const ScrollBlockSchema = z.enum(['start', 'center', 'end', 'nearest']);
+export const CookieSameSiteSchema = z.enum(['Strict', 'Lax', 'None']);
 
 export type BackendType = z.infer<typeof BackendSchema>;
 export type ImageFormat = z.infer<typeof ImageFormatSchema>;
 export type KeyModifier = z.infer<typeof ModifierSchema>;
+
+export const CookieItemSchema = z.object({
+  name: z.string().describe('Cookie name'),
+  value: z.string().describe('Cookie value'),
+  url: z.string().optional().describe('Request-URI to associate with the cookie'),
+  domain: z.string().optional().describe('Cookie domain (defaults to target URL hostname)'),
+  path: z.string().optional().default('/').describe("Cookie path (default: '/')"),
+  secure: z.boolean().optional().describe('Whether cookie is marked Secure'),
+  httpOnly: z
+    .boolean()
+    .optional()
+    .describe("Whether cookie is HttpOnly (automatically uses 'chrome' backend when true)"),
+  sameSite: CookieSameSiteSchema.optional().describe('SameSite policy (Strict, Lax, None)'),
+  expires: z.number().optional().describe('Expiration as Unix epoch timestamp in seconds'),
+});
+
+export type CookieItem = z.infer<typeof CookieItemSchema>;
+
+export const CookiesInputSchema = z.union([
+  z.string().describe("Raw Cookie header string, e.g. 'session_id=abc; theme=dark'"),
+  z.array(CookieItemSchema).describe('Array of structured cookie objects'),
+]);
+
+export type CookiesInput = z.infer<typeof CookiesInputSchema>;
+
+/**
+ * Shared authentication, cookies, custom HTTP headers, and Web Storage options.
+ */
+export const SharedAuthSchema = z.object({
+  cookies: CookiesInputSchema.optional().describe(
+    "Cookies to set before loading the page (either a 'k=v; k2=v2' string or an array of cookie objects)",
+  ),
+  headers: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe(
+      "Custom HTTP request headers (e.g. { Authorization: 'Bearer ...', Cookie: '...' }). Automatically uses 'chrome' backend unless 'webkit' is explicitly set.",
+    ),
+  localStorage: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe('Key-value pairs to pre-populate in window.localStorage for the target origin'),
+  sessionStorage: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe('Key-value pairs to pre-populate in window.sessionStorage for the target origin'),
+  userAgent: z.string().optional().describe('Custom User-Agent header override'),
+});
+
+export type AuthOptions = z.infer<typeof SharedAuthSchema>;
 
 const ViewportWidthField = z
   .number()
@@ -103,39 +154,43 @@ export const SharedTimingSchema = z.object({
     .describe('Additional settle time in milliseconds before capturing (default: 300)'),
 });
 
-export const ScreenshotPageSchema = SharedCaptureOutputSchema.merge(SharedTimingSchema).extend({
-  url: z
-    .string()
-    .describe('The URL to open (e.g. https://example.com, file:///..., or data:text/html,...)'),
-  width: ViewportWidthField,
-  height: ViewportHeightField,
-  maxHeight: MaxHeightField,
-  backend: BackendSchema.optional().describe(
-    "Browser engine: 'webkit' (default on macOS, zero dependencies) or 'chrome'",
-  ),
-  scrollForLazyLoad: z
-    .boolean()
-    .optional()
-    .default(true)
-    .describe(
-      'Scroll down the page before capture to trigger lazy-loaded images/sections (default: true)',
+export const ScreenshotPageSchema = SharedCaptureOutputSchema.merge(SharedTimingSchema)
+  .merge(SharedAuthSchema)
+  .extend({
+    url: z
+      .string()
+      .describe('The URL to open (e.g. https://example.com, file:///..., or data:text/html,...)'),
+    width: ViewportWidthField,
+    height: ViewportHeightField,
+    maxHeight: MaxHeightField,
+    backend: BackendSchema.optional().describe(
+      "Browser engine: 'webkit' (default on macOS, zero dependencies) or 'chrome' (auto-selected when custom HTTP headers or HttpOnly cookies are provided)",
     ),
-});
+    scrollForLazyLoad: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe(
+        'Scroll down the page before capture to trigger lazy-loaded images/sections (default: true)',
+      ),
+  });
 
-export const BrowserOpenSchema = SharedCaptureOutputSchema.merge(SharedTimingSchema).extend({
-  url: z.string().describe('The URL to navigate to'),
-  width: ViewportWidthField,
-  height: ViewportHeightField,
-  maxHeight: MaxHeightField,
-  backend: BackendSchema.optional(),
-  profileDirectory: z
-    .string()
-    .optional()
-    .describe(
-      'Optional directory path to persist cookies, localStorage, and session state across runs',
-    ),
-  scrollForLazyLoad: z.boolean().optional().default(true),
-});
+export const BrowserOpenSchema = SharedCaptureOutputSchema.merge(SharedTimingSchema)
+  .merge(SharedAuthSchema)
+  .extend({
+    url: z.string().describe('The URL to navigate to'),
+    width: ViewportWidthField,
+    height: ViewportHeightField,
+    maxHeight: MaxHeightField,
+    backend: BackendSchema.optional(),
+    profileDirectory: z
+      .string()
+      .optional()
+      .describe(
+        'Optional directory path to persist cookies, localStorage, and session state across runs',
+      ),
+    scrollForLazyLoad: z.boolean().optional().default(true),
+  });
 
 export const BrowserScreenshotSchema = SharedCaptureOutputSchema.merge(SharedTimingSchema).extend({
   maxHeight: MaxHeightField,
@@ -254,6 +309,19 @@ export const BrowserActSchema = SharedCaptureOutputSchema.omit({
     .describe('Capture and return a screenshot after performing the action (default: true)'),
 });
 
+export const BrowserCookiesSchema = z.object({
+  action: z
+    .enum(['get', 'set', 'clear'])
+    .describe(
+      "Cookie operation: 'get' (read current cookies), 'set' (inject cookies), or 'clear' (delete all cookies)",
+    ),
+  cookies: CookiesInputSchema.optional().describe("Cookies to set when action is 'set'"),
+  url: z
+    .string()
+    .optional()
+    .describe('Optional URL scope when setting or getting cookies (defaults to active page URL)'),
+});
+
 export const BrowserElementsSchema = z.object({
   limit: z
     .number()
@@ -279,10 +347,11 @@ export type ScreenshotPageArgs = z.infer<typeof ScreenshotPageSchema>;
 export type BrowserOpenArgs = z.infer<typeof BrowserOpenSchema>;
 export type BrowserScreenshotArgs = z.infer<typeof BrowserScreenshotSchema>;
 export type BrowserActArgs = z.infer<typeof BrowserActSchema>;
+export type BrowserCookiesArgs = z.infer<typeof BrowserCookiesSchema>;
 export type BrowserElementsArgs = z.infer<typeof BrowserElementsSchema>;
 export type BrowserConsoleArgs = z.infer<typeof BrowserConsoleSchema>;
 
-export interface CapturePageOptions {
+export interface CapturePageOptions extends AuthOptions {
   url?: string;
   width?: number;
   height?: number;

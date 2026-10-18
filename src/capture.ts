@@ -1,3 +1,4 @@
+import { navigateWithAuth, resolveEffectiveBackend } from './auth.ts';
 import {
   preparePageForCapture,
   restorePreResizeStyles,
@@ -47,7 +48,7 @@ export async function captureFromView(
   const waitMs = Math.max(0, options.waitMs ?? 300);
 
   if (options.url) {
-    await view.navigate(options.url);
+    await navigateWithAuth(view, backend, options.url, options);
   }
 
   if (options.waitForSelector) {
@@ -152,7 +153,7 @@ export async function captureFromView(
 export async function screenshotPageOneShot(
   options: CapturePageOptions & { url: string },
 ): Promise<CapturePageResult> {
-  const backend = options.backend ?? getDefaultBackend();
+  const backend = resolveEffectiveBackend(options, getDefaultBackend());
   const width = clampDimension(options.width ?? 1280);
   const height = clampDimension(options.height ?? 800);
 
